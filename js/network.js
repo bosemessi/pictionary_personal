@@ -7,16 +7,29 @@
 
 let gameMode = 'idle';            // 'idle' | 'host' | 'guest'
 let myPlayerIdx = -1;             // 0 = host, 1..n = guests
+let myName = 'Anonymous Doodler';
 
 // Host-side
 let peer = null;
 const connections = new Map();    // peerId -> DataConnection
 const acceptedOrder = [];         // peerIds in accept order (idx i → playerIdx i+1)
 const pendingKnocks = [];         // peerIds waiting for host approval
+const guestNames = new Map();     // peerId -> chosen display name
 let hostSettings = null;          // { difficulty, rotations, customWords }
 
 // Guest-side
 let hostConn = null;
+
+function setMyName(name) {
+  const trimmed = String(name || '').trim().slice(0, 20);
+  myName = trimmed || 'Anonymous Doodler';
+  try { localStorage.setItem('pictionary_name', myName); } catch {}
+}
+
+function sanitizeName(name) {
+  const trimmed = String(name || '').trim().slice(0, 20);
+  return trimmed || 'Anonymous Doodler';
+}
 
 function randomRoomId() {
   return Math.random().toString(36).substring(2, 10);
@@ -65,6 +78,7 @@ function setupGuestConnection(conn) {
 
 function handleGuestDisconnect(peerId) {
   connections.delete(peerId);
+  guestNames.delete(peerId);
   const ai = acceptedOrder.indexOf(peerId);
   if (ai !== -1) acceptedOrder.splice(ai, 1);
   const pi = pendingKnocks.indexOf(peerId);
@@ -119,20 +133,28 @@ function startNetworkGame() {
     .split('\n').map(s => s.trim()).filter(Boolean);
   hostSettings = { difficulty, rotations, customWords };
 
+  // Build the player-name roster: host first, then accepted guests in order.
+  const names = [myName];
+  acceptedOrder.forEach(peerId => {
+    names.push(guestNames.get(peerId) || `Player ${names.length + 1}`);
+  });
+
   hostSetupGame({
     numPlayers: total,
     difficulty,
     rotations,
     customWords,
+    names,
   });
 
-  // Tell each guest who they are.
+  // Tell each guest who they are (and everyone's names).
   acceptedOrder.forEach((peerId, i) => {
     connections.get(peerId)?.send({
       type: 'game_init',
       numPlayers: total,
       totalRounds: gameState.totalRounds,
       yourPlayerIdx: i + 1,
+      names,
     });
   });
 
@@ -150,6 +172,7 @@ function joinAsGuest(hostId) {
   peer.on('open', () => {
     hostConn = peer.connect(hostId);
     hostConn.on('open', () => {
+      hostConn.send({ type: 'set_name', name: myName });
       document.getElementById('guest-status').textContent =
         "Knocking on the host's door…";
     });
@@ -178,6 +201,13 @@ function joinAsGuest(hostId) {
 // Host: inbound messages from guests
 // =============================================================
 function onGuestData(peerId, data) {
+  // set_name is the only message accepted before the host accepts the knock.
+  if (data.type === 'set_name') {
+    guestNames.set(peerId, sanitizeName(data.name));
+    refreshLobbyUI();
+    return;
+  }
+
   const playerIdx = acceptedOrder.indexOf(peerId) + 1; // 0 if not accepted
   if (playerIdx <= 0) return;
 
@@ -444,6 +474,7 @@ function onHostData(data) {
       guestSetupGame({
         numPlayers: data.numPlayers,
         totalRounds: data.totalRounds,
+        names: data.names,
         myIdx: data.yourPlayerIdx,
       });
       showScreen('game');
@@ -509,6 +540,12 @@ function applyMessageLocally(msg) {
       }
       hideOverlays();
       refreshAll();
+      playRoundStartDing();
+      break;
+
+    case 'pattern_update':
+      gameState.wordPattern = msg.wordPattern;
+      renderHeader();
       break;
 
     case 'stroke_segment':
@@ -539,6 +576,7 @@ function applyMessageLocally(msg) {
         text: `✓ ${guesser ? guesser.name : `Player ${msg.guesserIdx + 1}`} got it! +${msg.guesserDelta}`,
       });
       refreshScoreboardAndInput();
+      playCorrectChime();
       break;
     }
 
@@ -563,6 +601,7 @@ function applyMessageLocally(msg) {
       gameState.phase = 'game_over';
       showGameEnd(msg.standings);
       refreshAll();
+      playFanfare();
       break;
   }
 }
@@ -579,11 +618,16 @@ function playAgain() {
   if (gameMode !== 'host' || !hostSettings) return;
   hideOverlays();
   const total = 1 + acceptedOrder.length;
+  const names = [myName];
+  acceptedOrder.forEach(peerId => {
+    names.push(guestNames.get(peerId) || `Player ${names.length + 1}`);
+  });
   hostSetupGame({
     numPlayers: total,
     difficulty: hostSettings.difficulty,
     rotations: hostSettings.rotations,
     customWords: hostSettings.customWords,
+    names,
   });
   acceptedOrder.forEach((peerId, i) => {
     connections.get(peerId)?.send({
@@ -591,6 +635,7 @@ function playAgain() {
       numPlayers: total,
       totalRounds: gameState.totalRounds,
       yourPlayerIdx: i + 1,
+      names,
     });
   });
   enterGameScreen();
@@ -604,11 +649,12 @@ function refreshLobbyUI() {
   const list = document.getElementById('player-list');
   list.innerHTML = '';
   const li0 = document.createElement('li');
-  li0.textContent = 'Player 1 — You (host)';
+  li0.textContent = `${myName} — You (host)`;
   list.appendChild(li0);
   acceptedOrder.forEach((peerId, i) => {
     const li = document.createElement('li');
-    li.textContent = `Player ${i + 2} — ${peerId.slice(0, 8)}`;
+    const name = guestNames.get(peerId) || peerId.slice(0, 8);
+    li.textContent = `${name}`;
     list.appendChild(li);
   });
 
@@ -617,8 +663,10 @@ function refreshLobbyUI() {
     knockBox.style.display = 'block';
     const queueNote = pendingKnocks.length > 1
       ? ` (+${pendingKnocks.length - 1} more waiting)` : '';
+    const knockerId = pendingKnocks[0];
+    const knockerName = guestNames.get(knockerId) || knockerId.slice(0, 8);
     document.getElementById('knock-name').textContent =
-      `${pendingKnocks[0].slice(0, 8)} wants to join${queueNote}`;
+      `${knockerName} wants to join${queueNote}`;
   } else {
     knockBox.style.display = 'none';
   }
@@ -641,6 +689,7 @@ function teardownNetwork() {
   connections.clear();
   acceptedOrder.length = 0;
   pendingKnocks.length = 0;
+  guestNames.clear();
   try { hostConn?.close(); } catch {}
   hostConn = null;
   try { peer?.destroy(); } catch {}

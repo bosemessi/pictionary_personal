@@ -53,6 +53,7 @@ let sentAnyForStroke = false;
 let flushTimerId = null;
 
 let timerIntervalId = null;
+let lastTimerSec = null;        // tracks transition into the urgent zone
 
 // =============================================================
 // Setup
@@ -375,11 +376,19 @@ function updateTimerDisplay() {
   else {
     timerEl.textContent = '';
     timerEl.classList.remove('urgent');
+    lastTimerSec = null;
     return;
   }
   const remaining = Math.max(0, Math.ceil((target - Date.now()) / 1000));
   timerEl.textContent = String(remaining);
   timerEl.classList.toggle('urgent', remaining <= 10 && gameState.phase === 'drawing');
+
+  // Single warning tick when we transition into the urgent zone.
+  if (gameState.phase === 'drawing'
+      && lastTimerSec !== null && lastTimerSec > 10 && remaining <= 10) {
+    playTimeWarning();
+  }
+  lastTimerSec = remaining;
 
   if (wordPickTimerEl && gameState.phase === 'word_pick') {
     wordPickTimerEl.textContent = String(remaining);

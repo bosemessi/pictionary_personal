@@ -11,20 +11,38 @@ function showScreen(name) {
 document.addEventListener('DOMContentLoaded', () => {
   initUI();
 
+  // Pre-fill name inputs from localStorage.
+  let savedName = '';
+  try { savedName = localStorage.getItem('pictionary_name') || ''; } catch {}
+  document.getElementById('player-name').value = savedName;
+  document.getElementById('player-name-guest').value = savedName;
+
   // URL-based routing.
   const invite = new URLSearchParams(location.search).get('invite');
   if (invite) {
     showScreen('lobby-guest');
-    joinAsGuest(invite);
+    // Wait for the user to confirm their name + click Join.
   } else {
     showScreen('landing');
   }
 
   // Landing
   document.getElementById('btn-host-game').addEventListener('click', () => {
+    unlockAudio();
+    setMyName(document.getElementById('player-name').value);
     showScreen('lobby-host');
     startHosting();
     refreshLobbyUI();
+  });
+
+  // Guest join (only wired when ?invite= present)
+  document.getElementById('btn-join-game').addEventListener('click', () => {
+    if (!invite) return;
+    unlockAudio();
+    setMyName(document.getElementById('player-name-guest').value);
+    document.getElementById('guest-name-step').style.display = 'none';
+    document.getElementById('guest-status').textContent = 'Connecting…';
+    joinAsGuest(invite);
   });
 
   // Host lobby
@@ -55,6 +73,17 @@ document.addEventListener('DOMContentLoaded', () => {
       teardownNetwork();
       showScreen('landing');
     }
+  });
+
+  // Sound toggle
+  const btnSound = document.getElementById('btn-sound');
+  function refreshSoundButton() {
+    btnSound.textContent = isSoundEnabled() ? '🔊' : '🔇';
+  }
+  refreshSoundButton();
+  btnSound.addEventListener('click', () => {
+    setSoundEnabled(!isSoundEnabled());
+    refreshSoundButton();
   });
 
   // Game-end overlay

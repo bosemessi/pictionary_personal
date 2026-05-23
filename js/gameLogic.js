@@ -44,6 +44,8 @@ let hostRoundTimerId = null;    // setTimeout for round end
 let hostPickTimerId = null;     // setTimeout for word-pick auto-pick
 let hostTickIntervalId = null;  // setInterval for local timer display refresh
 let hostCurrentDeltas = null;   // { idx: delta } accumulated this round
+let hostRevealTimers = [];      // setTimeout handles for letter reveals
+let hostRevealedIndices = null; // Set of revealed letter positions this round
 
 // =============================================================
 // Word normalization & matching
@@ -60,19 +62,27 @@ function wordsMatch(guess, secret) {
   return normalizeWord(guess) === normalizeWord(secret);
 }
 
-function makeWordPattern(word) {
-  // Render letters as "_" but keep spaces visible. Display joins with " ".
-  // e.g. "rubber duck" -> "_ _ _ _ _ _   _ _ _ _" (we render with a single space between each char, and a double space for spaces)
-  return word.split('').map(c => c === ' ' ? '  ' : '_').join(' ');
+function makeWordPattern(word, revealedIndices) {
+  // Render letters as "_" but keep spaces visible. revealedIndices is a Set
+  // of character positions whose letter should be shown (uppercased).
+  const revealed = revealedIndices instanceof Set
+    ? revealedIndices
+    : new Set(revealedIndices || []);
+  return word.split('').map((c, i) => {
+    if (c === ' ') return '  ';
+    if (revealed.has(i)) return c.toUpperCase();
+    return '_';
+  }).join(' ');
 }
 
 // =============================================================
 // Player helpers
 // =============================================================
-function makePlayers(numPlayers) {
+function makePlayers(numPlayers, names) {
   const arr = [];
   for (let i = 0; i < numPlayers; i++) {
-    arr.push({ idx: i, name: `Player ${i + 1}`, score: 0, hasSolvedThisRound: false });
+    const name = (names && names[i]) ? names[i] : `Player ${i + 1}`;
+    arr.push({ idx: i, name, score: 0, hasSolvedThisRound: false });
   }
   return arr;
 }
@@ -109,8 +119,8 @@ function applyClearCanvas() {
 // =============================================================
 // Host: game setup
 // =============================================================
-function hostSetupGame({ numPlayers, difficulty, rotations, customWords }) {
-  gameState.players = makePlayers(numPlayers);
+function hostSetupGame({ numPlayers, difficulty, rotations, customWords, names }) {
+  gameState.players = makePlayers(numPlayers, names);
   gameState.totalRounds = numPlayers * rotations;
   gameState.roundIdx = -1;       // advanceRound bumps to 0
   gameState.phase = 'idle';
@@ -123,8 +133,8 @@ function hostSetupGame({ numPlayers, difficulty, rotations, customWords }) {
 // Mirror of the above on the guest side. Players are reconstructed by the
 // host's broadcast on round_start (we just need an empty array of the right
 // shape until then).
-function guestSetupGame({ numPlayers, totalRounds, myIdx }) {
-  gameState.players = makePlayers(numPlayers);
+function guestSetupGame({ numPlayers, totalRounds, names, myIdx }) {
+  gameState.players = makePlayers(numPlayers, names);
   gameState.totalRounds = totalRounds;
   gameState.roundIdx = -1;
   gameState.phase = 'idle';
@@ -216,6 +226,42 @@ function hostFinalizeWordChoice(choiceIdx, broadcast) {
   });
 
   hostRoundTimerId = setTimeout(() => hostEndRound('timeout', broadcast), ROUND_DURATION_SEC * 1000);
+  scheduleLetterReveals(word, broadcast);
+}
+
+// Reveal one or two random letters as the timer runs down. Pure host-side
+// scheduling; receivers learn about reveals via pattern_update messages.
+function scheduleLetterReveals(word, broadcast) {
+  const nonSpaceIdx = [];
+  for (let i = 0; i < word.length; i++) if (word[i] !== ' ') nonSpaceIdx.push(i);
+
+  // Skip reveals for very short words (≤3 chars would be ~trivial).
+  let numReveals;
+  if (nonSpaceIdx.length <= 3) numReveals = 0;
+  else if (nonSpaceIdx.length <= 5) numReveals = 1;
+  else numReveals = 2;
+  if (numReveals === 0) return;
+
+  // Fisher-Yates shuffle, take the first numReveals positions.
+  for (let i = nonSpaceIdx.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [nonSpaceIdx[i], nonSpaceIdx[j]] = [nonSpaceIdx[j], nonSpaceIdx[i]];
+  }
+  const reveals = nonSpaceIdx.slice(0, numReveals);
+  hostRevealedIndices = new Set();
+
+  const timings = numReveals === 1 ? [30] : [30, 15]; // seconds remaining
+  reveals.forEach((idx, i) => {
+    const remaining = timings[i];
+    const delayMs = (ROUND_DURATION_SEC - remaining) * 1000;
+    const handle = setTimeout(() => {
+      if (gameState.phase !== 'drawing') return;
+      hostRevealedIndices.add(idx);
+      const pattern = makeWordPattern(word, hostRevealedIndices);
+      broadcast({ type: 'pattern_update', wordPattern: pattern });
+    }, delayMs);
+    hostRevealTimers.push(handle);
+  });
 }
 
 // Returns 'correct' | 'wrong' (host-side only)
@@ -300,9 +346,11 @@ function hostClearAllTimers() {
   if (hostRoundTimerId) clearTimeout(hostRoundTimerId);
   if (hostPickTimerId) clearTimeout(hostPickTimerId);
   if (hostTickIntervalId) clearInterval(hostTickIntervalId);
+  for (const t of hostRevealTimers) clearTimeout(t);
   hostRoundTimerId = null;
   hostPickTimerId = null;
   hostTickIntervalId = null;
+  hostRevealTimers = [];
 }
 
 // network.js sets this to a bound sendToPeer(idx, msg) function on the host.
