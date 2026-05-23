@@ -33,6 +33,7 @@
   letter-spacing: 0.15em;
   color: #f0f4ff;
   font-weight: 600;
+  white-space: nowrap;
 }
 
 .word-display.revealed {
@@ -448,6 +449,13 @@
     font-size: 0.9em;
   }
   .word-display { font-size: 1.2em; }
+}
+
+@media (max-width: 600px) {
+  .header-center {
+    flex-basis: 100%;
+    order: 3;
+  }
 }
 
 @media (max-width: 500px) {
